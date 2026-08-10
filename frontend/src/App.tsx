@@ -1,4 +1,5 @@
-import { useState }          from "react"
+import { useState, useEffect, useRef } from "react"
+import type { PricePoint }   from "./types"
 import { Routes, Route, useNavigate, useLocation } from "react-router-dom"
 import { TrendingUp, Activity, DollarSign, Zap, BarChart2, LogOut, User, Search } from "lucide-react"
 import { useAnalytics }      from "./hooks/useAnalytics"
@@ -179,6 +180,26 @@ function Home() {
   const topVol = stats?.symbolStats?.[0]
   const volume = stats?.totalVolume ?? 0
 
+  // Build merged price history that includes ALL pinned symbols (default + custom)
+  const localHistRef = useRef<PricePoint[]>([])
+  const [mergedHistory, setMergedHistory] = useState<PricePoint[]>([])
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const prices: Record<string, number> = {}
+      // Default 5 from live stats
+      allSymbolStats.forEach(s => { if (s.lastPrice > 0) prices[s.symbol] = s.lastPrice })
+      // Any extra pinned coins from REST polling
+      Object.values(pinnedPrices).forEach(p => { if (p.lastPrice > 0) prices[p.symbol] = p.lastPrice })
+      if (Object.keys(prices).length === 0) return
+      const point: PricePoint = { second: Math.floor(Date.now() / 1000), prices }
+      localHistRef.current = [...localHistRef.current.slice(-299), point]
+      setMergedHistory([...localHistRef.current])
+    }, 1_000)
+    return () => clearInterval(id)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allSymbolStats, pinnedPrices])
+
   return (
     <div style={{ minHeight: "100vh", background: "#0F172A", color: "#F1F5F9", fontFamily: "'Inter','Segoe UI',system-ui,sans-serif" }}>
       <AppHeader />
@@ -275,7 +296,7 @@ function Home() {
           gridTemplateColumns: "1fr 1fr",
           gap: 16,
         }}>
-          <PriceChart data={stats?.priceHistory ?? []} symbols={pinned} />
+          <PriceChart data={mergedHistory} symbols={pinned} />
           <VolumeBar  data={allSymbolStats} />
         </div>
       </main>

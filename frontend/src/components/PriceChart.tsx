@@ -5,12 +5,21 @@ import {
 import type { PricePoint } from "../types"
 import { shortSym } from "../lib/format"
 
-const COLORS: Record<string, string> = {
+const BASE_COLORS: Record<string, string> = {
   BTCUSDT: "#F59E0B",
   ETHUSDT: "#3B82F6",
   BNBUSDT: "#10B981",
   SOLUSDT: "#8B5CF6",
   XRPUSDT: "#EC4899",
+}
+
+// Generate a deterministic colour for any symbol not in the base map
+const EXTRA_PALETTE = ["#06B6D4","#EF4444","#A78BFA","#FB923C","#34D399","#F472B6","#FBBF24","#60A5FA"]
+function colorFor(sym: string): string {
+  if (BASE_COLORS[sym]) return BASE_COLORS[sym]
+  let hash = 0
+  for (let i = 0; i < sym.length; i++) hash = (hash * 31 + sym.charCodeAt(i)) & 0xffffffff
+  return EXTRA_PALETTE[Math.abs(hash) % EXTRA_PALETTE.length]
 }
 
 interface Props {
@@ -41,7 +50,7 @@ export function PriceChart({ data, symbols }: Props) {
       </h2>
       {symbols.map(sym => (
         <div key={sym} style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 12, color: COLORS[sym] ?? "#94A3B8", fontWeight: 600, marginBottom: 6 }}>
+          <div style={{ fontSize: 12, color: colorFor(sym), fontWeight: 600, marginBottom: 6 }}>
             {shortSym(sym)} / USDT
           </div>
           <ResponsiveContainer width="100%" height={100}>
@@ -59,13 +68,13 @@ export function PriceChart({ data, symbols }: Props) {
               <Tooltip
                 contentStyle={{ background: "#0F172A", border: "1px solid #334155", borderRadius: 8, fontSize: 11 }}
                 labelFormatter={(v) => fmtTime(v as number)}
-                formatter={(v: number) => [`$${v.toLocaleString("en-US", { maximumFractionDigits: 4 })}`, shortSym(sym)]}
+                formatter={(v: number) => [`$${v.toLocaleString("en-US", { maximumFractionDigits: 6 })}`, shortSym(sym)]}
                 labelStyle={{ color: "#94A3B8" }}
               />
               <Line
                 type="monotone"
                 dataKey={sym}
-                stroke={COLORS[sym] ?? "#3B82F6"}
+                stroke={colorFor(sym)}
                 strokeWidth={1.5}
                 dot={false}
                 isAnimationActive={false}
