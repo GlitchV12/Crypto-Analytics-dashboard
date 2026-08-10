@@ -36,7 +36,7 @@ function StatPill({ label, value, color = "#94A3B8" }: { label: string; value: s
   )
 }
 
-export function CoinDetail() {
+export function CoinDetail({ embedded = false }: { embedded?: boolean }) {
   const { symbol = "" }          = useParams<{ symbol: string }>()
   const navigate                 = useNavigate()
   const { stats, connectionState, lastUpdate, triggeredAlerts, clearAlerts } = useAnalytics()
@@ -113,10 +113,10 @@ export function CoinDetail() {
   ]
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0F172A", color: "#F1F5F9", fontFamily: "'Inter','Segoe UI',system-ui,sans-serif" }}>
+    <div style={{ minHeight: embedded ? "auto" : "100vh", background: "#0F172A", color: "#F1F5F9", fontFamily: "'Inter','Segoe UI',system-ui,sans-serif" }}>
 
-      {/* Header */}
-      <header style={{
+      {/* Header — hidden when embedded inside AppHeader layout */}
+      {!embedded && <header style={{
         borderBottom: "1px solid #1E293B", padding: "0 32px", height: 60,
         display: "flex", alignItems: "center", justifyContent: "space-between",
         background: "#0A1220", position: "sticky", top: 0, zIndex: 100,
@@ -162,7 +162,7 @@ export function CoinDetail() {
           )}
           <ConnectionBadge state={connectionState} lastUpdate={lastUpdate} />
         </div>
-      </header>
+      </header>}
 
       <main style={{ padding: "28px 32px", maxWidth: 1400, margin: "0 auto" }}>
         {loading ? (

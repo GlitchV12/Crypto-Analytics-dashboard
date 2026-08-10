@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@react-oauth/google": "^0.13.5",
     "@types/react-router-dom": "^5.3.3",
     "lightweight-charts": "^5.2.0",
     "lucide-react": "^0.400.0",
