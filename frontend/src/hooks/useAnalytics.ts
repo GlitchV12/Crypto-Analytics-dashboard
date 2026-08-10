@@ -2,13 +2,12 @@ import { useEffect, useRef, useState, useCallback } from "react"
 import type { Stats, WSMessage, TriggeredAlert } from "../types"
 import { getWsUrl } from "../lib/config"
 
-const WS_URL     = getWsUrl()
+const WS_URL      = getWsUrl()
 const HAS_BACKEND = !!import.meta.env.VITE_API_URL
 
 const RECONNECT_DELAY_MS  = 2000
 const MAX_RECONNECT_DELAY = 30_000
 
-// Direct Binance combined stream — used when no backend is configured
 const BINANCE_STREAM =
   "wss://stream.binance.com:9443/stream?streams=" +
   ["btcusdt","ethusdt","bnbusdt","solusdt","xrpusdt"]
@@ -25,13 +24,12 @@ interface UseAnalyticsReturn {
   clearAlerts:     () => void
 }
 
-// ─── Binance fallback state builder ──────────────────────────────
 interface SymState {
   symbol:    string
   trades:    number
   volume:    number
   lastPrice: number
-  prices:    number[]   // rolling last 60s
+  prices:    number[]
   buyCount:  number
   sellCount: number
 }
@@ -57,12 +55,11 @@ function makeStats(syms: Record<string, SymState>, timeline: { second: number; c
     symbolStats,
     sideSplit,
     timeline,
-    priceHistory: [],   // not available in fallback
+    priceHistory: [],
     timestamp:    Date.now() / 1000,
   }
 }
 
-// ─── Main hook ───────────────────────────────────────────────────
 export function useAnalytics(): UseAnalyticsReturn {
   const [stats,           setStats]           = useState<Stats | null>(null)
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting")
@@ -79,12 +76,14 @@ export function useAnalytics(): UseAnalyticsReturn {
   // ── Backend mode ──────────────────────────────────────────────
   const connectBackend = useCallback(() => {
     if (unmounted.current) return
+    console.log("[Backend WS] connecting →", WS_URL)
     setConnectionState("connecting")
     const ws = new WebSocket(WS_URL)
     wsRef.current = ws
 
     ws.onopen = () => {
       if (unmounted.current) { ws.close(); return }
+      console.log("[Backend WS] ✓ connected")
       setConnectionState("connected")
       delayRef.current = RECONNECT_DELAY_MS
     }
@@ -107,7 +106,8 @@ export function useAnalytics(): UseAnalyticsReturn {
       } catch { /* ignore */ }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
+      console.warn("[Backend WS] closed — code:", e.code, "| reason:", e.reason || "(none)")
       if (unmounted.current) return
       setConnectionState("disconnected")
       timerRef.current = setTimeout(() => {
@@ -116,31 +116,33 @@ export function useAnalytics(): UseAnalyticsReturn {
       }, delayRef.current)
     }
 
-    ws.onerror = () => ws.close()
+    ws.onerror = (e) => {
+      console.error("[Backend WS] error:", e)
+      ws.close()
+    }
   }, [])
 
-  // ── Binance direct fallback mode ──────────────────────────────
+  // ── Direct Binance fallback ───────────────────────────────────
   const connectBinance = useCallback(() => {
     if (unmounted.current) return
+    console.log("[Binance WS] connecting →", BINANCE_STREAM)
     setConnectionState("connecting")
 
-    const syms: Record<string, SymState> = {}
     const PAIRS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"]
+    const syms: Record<string, SymState> = {}
     PAIRS.forEach(p => {
       syms[p] = { symbol: p, trades: 0, volume: 0, lastPrice: 0, prices: [], buyCount: 0, sellCount: 0 }
     })
 
     const timeline: { second: number; count: number }[] = []
-    let   tickCount = 0
+    let tickCount = 0
 
-    // Broadcast every 500ms so UI feels live
     const broadcastId = setInterval(() => {
       if (unmounted.current) return
       setStats(makeStats(syms, timeline))
       setLastUpdate(new Date())
     }, 500)
 
-    // Roll timeline every second
     const timelineId = setInterval(() => {
       timeline.push({ second: Math.floor(Date.now()/1000), count: tickCount })
       tickCount = 0
@@ -152,6 +154,7 @@ export function useAnalytics(): UseAnalyticsReturn {
 
     ws.onopen = () => {
       if (unmounted.current) { ws.close(); return }
+      console.log("[Binance WS] ✓ connected — waiting for first trade messages...")
       setConnectionState("connected")
       delayRef.current = RECONNECT_DELAY_MS
     }
@@ -162,12 +165,19 @@ export function useAnalytics(): UseAnalyticsReturn {
         const msg = JSON.parse(ev.data) as { stream: string; data: Record<string, unknown> }
         const d   = msg.data
         const sym = (d["s"] as string).toUpperCase()
-        if (!syms[sym]) return
+        if (!syms[sym]) {
+          console.warn("[Binance WS] unknown symbol in message:", sym)
+          return
+        }
 
         if (msg.stream.includes("@aggTrade")) {
           const price = parseFloat(d["p"] as string)
           const qty   = parseFloat(d["q"] as string)
-          const isBuy = !(d["m"] as boolean)  // market maker = sell side
+          const isBuy = !(d["m"] as boolean)
+
+          if (syms[sym].trades === 0) {
+            console.log(`[Binance WS] first trade ${sym} → $${price}`)
+          }
 
           syms[sym].lastPrice = price
           syms[sym].trades   += 1
@@ -175,17 +185,23 @@ export function useAnalytics(): UseAnalyticsReturn {
           syms[sym].prices    = [...syms[sym].prices.slice(-59), price]
           if (isBuy) syms[sym].buyCount++; else syms[sym].sellCount++
           tickCount++
+
         } else if (msg.stream.includes("@miniTicker")) {
-          // Fill in price immediately from ticker if no trades yet
           const c = parseFloat(d["c"] as string)
-          if (syms[sym].lastPrice === 0) syms[sym].lastPrice = c
+          if (syms[sym].lastPrice === 0) {
+            console.log(`[Binance WS] miniTicker seed ${sym} → $${c}`)
+            syms[sym].lastPrice = c
+          }
         }
-      } catch { /* ignore malformed */ }
+      } catch (err) {
+        console.error("[Binance WS] parse error:", err, "raw:", ev.data.slice(0, 120))
+      }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       clearInterval(broadcastId)
       clearInterval(timelineId)
+      console.warn("[Binance WS] closed — code:", e.code, "| reason:", e.reason || "(none)")
       if (unmounted.current) return
       setConnectionState("disconnected")
       timerRef.current = setTimeout(() => {
@@ -194,13 +210,23 @@ export function useAnalytics(): UseAnalyticsReturn {
       }, delayRef.current)
     }
 
-    ws.onerror = () => ws.close()
+    ws.onerror = (e) => {
+      console.error("[Binance WS] error event:", e)
+      ws.close()
+    }
 
     return () => { clearInterval(broadcastId); clearInterval(timelineId) }
   }, [])
 
   useEffect(() => {
     unmounted.current = false
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    console.log("[CryptoStream] starting up")
+    console.log("[CryptoStream] mode       :", HAS_BACKEND ? "backend (Railway)" : "direct Binance WS")
+    console.log("[CryptoStream] VITE_API_URL:", import.meta.env.VITE_API_URL ?? "(not set)")
+    console.log("[CryptoStream] WS target   :", HAS_BACKEND ? WS_URL : BINANCE_STREAM)
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
     if (HAS_BACKEND) {
       connectBackend()
     } else {
