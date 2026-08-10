@@ -1,3 +1,5 @@
+console.log("🚀 CryptoStream main.tsx loaded — build:", new Date().toISOString())
+
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import { BrowserRouter } from "react-router-dom"

@@ -1,103 +1,101 @@
+/**
+ * useLivePrices — fetches real crypto prices via CoinGecko REST API.
+ * No WebSocket, no Binance dependency, works everywhere globally.
+ * Polls every 15 seconds. Zero API key required.
+ */
 import { useEffect, useRef, useState } from "react"
 
+console.log("[useLivePrices] module loaded")
+
 export interface LivePrice {
-  symbol:    string   // e.g. "BTCUSDT"
+  symbol:    string
   price:     number
-  change:    number   // 24h change %
-  high:      number
-  low:       number
-  connected: boolean
+  change24h: number
+  high24h:   number
+  low24h:    number
 }
 
-const PAIRS   = ["btcusdt","ethusdt","bnbusdt","solusdt","xrpusdt"]
-const STREAM  = "wss://stream.binance.com:9443/stream?streams=" +
-  PAIRS.map(s => `${s}@miniTicker`).join("/")
+export type FetchStatus = "idle" | "loading" | "ok" | "error"
 
-const DEFAULT: Record<string, LivePrice> = {
-  BTCUSDT: { symbol:"BTCUSDT", price:0, change:0, high:0, low:0, connected:false },
-  ETHUSDT: { symbol:"ETHUSDT", price:0, change:0, high:0, low:0, connected:false },
-  BNBUSDT: { symbol:"BNBUSDT", price:0, change:0, high:0, low:0, connected:false },
-  SOLUSDT: { symbol:"SOLUSDT", price:0, change:0, high:0, low:0, connected:false },
-  XRPUSDT: { symbol:"XRPUSDT", price:0, change:0, high:0, low:0, connected:false },
+const COINGECKO_URL =
+  "https://api.coingecko.com/api/v3/simple/price" +
+  "?ids=bitcoin,ethereum,binancecoin,solana,ripple" +
+  "&vs_currencies=usd" +
+  "&include_24hr_change=true" +
+  "&include_24hr_vol=true" +
+  "&include_high_vol=false"
+
+const ID_TO_SYMBOL: Record<string, string> = {
+  bitcoin:     "BTCUSDT",
+  ethereum:    "ETHUSDT",
+  binancecoin: "BNBUSDT",
+  solana:      "SOLUSDT",
+  ripple:      "XRPUSDT",
 }
 
-export type WSStatus = "connecting" | "connected" | "error" | "blocked"
+const EMPTY: Record<string, LivePrice> = {}
 
 export function useLivePrices() {
-  const [prices,   setPrices]   = useState<Record<string, LivePrice>>(DEFAULT)
-  const [status,   setStatus]   = useState<WSStatus>("connecting")
-  const [errMsg,   setErrMsg]   = useState("")
-  const wsRef     = useRef<WebSocket | null>(null)
+  const [prices,    setPrices]    = useState<Record<string, LivePrice>>(EMPTY)
+  const [status,    setStatus]    = useState<FetchStatus>("idle")
+  const [lastFetch, setLastFetch] = useState<Date | null>(null)
+  const [errMsg,    setErrMsg]    = useState("")
+  const timerRef  = useRef<ReturnType<typeof setInterval> | null>(null)
   const unmounted = useRef(false)
 
-  useEffect(() => {
-    unmounted.current = false
+  async function fetchPrices() {
+    console.log("[useLivePrices] fetching CoinGecko prices...")
+    setStatus("loading")
+    try {
+      const res = await fetch(COINGECKO_URL, {
+        headers: { Accept: "application/json" },
+      })
+      console.log("[useLivePrices] response status:", res.status)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as Record<string, Record<string, number>>
+      console.log("[useLivePrices] raw data:", data)
 
-    function connect() {
-      console.log("[useLivePrices] opening →", STREAM)
-      const ws = new WebSocket(STREAM)
-      wsRef.current = ws
-
-      const timeout = setTimeout(() => {
-        if (ws.readyState !== WebSocket.OPEN) {
-          console.warn("[useLivePrices] connection timed out after 8s")
-          setStatus("blocked")
-          setErrMsg("WebSocket timed out — Binance may be blocked on this network")
-          ws.close()
+      const next: Record<string, LivePrice> = {}
+      for (const [id, vals] of Object.entries(data)) {
+        const sym = ID_TO_SYMBOL[id]
+        if (!sym) continue
+        next[sym] = {
+          symbol:    sym,
+          price:     vals["usd"]            ?? 0,
+          change24h: vals["usd_24h_change"] ?? 0,
+          high24h:   0,
+          low24h:    0,
         }
-      }, 8000)
+        console.log(`[useLivePrices] ${sym} = $${next[sym].price} (${next[sym].change24h.toFixed(2)}%)`)
+      }
 
-      ws.onopen = () => {
-        clearTimeout(timeout)
-        if (unmounted.current) { ws.close(); return }
-        console.log("[useLivePrices] ✓ connected")
-        setStatus("connected")
+      if (!unmounted.current) {
+        setPrices(next)
+        setStatus("ok")
+        setLastFetch(new Date())
         setErrMsg("")
       }
-
-      ws.onmessage = (ev) => {
-        if (unmounted.current) return
-        try {
-          const msg  = JSON.parse(ev.data)
-          const d    = msg.data
-          const sym  = (d.s as string).toUpperCase()
-          const c    = parseFloat(d.c)   // close price
-          const P    = parseFloat(d.P)   // price change %
-          const h    = parseFloat(d.h)
-          const l    = parseFloat(d.l)
-          setPrices(prev => ({
-            ...prev,
-            [sym]: { symbol: sym, price: c, change: P, high: h, low: l, connected: true },
-          }))
-        } catch { /* ignore */ }
-      }
-
-      ws.onerror = () => {
-        clearTimeout(timeout)
-        console.error("[useLivePrices] WebSocket error — likely blocked")
+    } catch (err) {
+      console.error("[useLivePrices] fetch failed:", err)
+      if (!unmounted.current) {
         setStatus("error")
-        setErrMsg("WebSocket error — check if Binance is reachable")
-      }
-
-      ws.onclose = (e) => {
-        clearTimeout(timeout)
-        console.warn("[useLivePrices] closed — code:", e.code)
-        if (unmounted.current) return
-        if (e.code === 1006) {
-          setStatus("blocked")
-          setErrMsg(`Connection refused (code 1006) — Binance WebSocket may be blocked`)
-        }
-        // Retry after 4s
-        setTimeout(() => { if (!unmounted.current) connect() }, 4000)
+        setErrMsg(String(err))
       }
     }
+  }
 
-    connect()
+  useEffect(() => {
+    console.log("[useLivePrices] useEffect mounted — starting price polling")
+    unmounted.current = false
+    fetchPrices()
+    timerRef.current = setInterval(fetchPrices, 15_000)
     return () => {
       unmounted.current = true
-      wsRef.current?.close()
+      if (timerRef.current) clearInterval(timerRef.current)
+      console.log("[useLivePrices] unmounted")
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  return { prices, status, errMsg }
+  return { prices, status, lastFetch, errMsg }
 }

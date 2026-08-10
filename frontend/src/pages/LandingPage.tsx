@@ -296,7 +296,7 @@ const COMMS = [
 export function LandingPage() {
   const navigate = useNavigate()
   const [scrolled, setScrolled] = useState(false)
-  const { prices, status, errMsg } = useLivePrices()
+  const { prices, status, errMsg, lastFetch } = useLivePrices()
 
   // Build ticker list from live prices
   const liveTickers = [
@@ -314,8 +314,8 @@ export function LandingPage() {
     return {
       symbol: sym,
       price:  p?.price ? fmtPrice(p.price) : "—",
-      change: p?.change != null ? `${p.change >= 0 ? "+" : ""}${p.change.toFixed(2)}%` : "…",
-      up:     (p?.change ?? 0) >= 0,
+      change: p?.change24h != null ? `${p.change24h >= 0 ? "+" : ""}${p.change24h.toFixed(2)}%` : "…",
+      up:     (p?.change24h ?? 0) >= 0,
       color:  COIN_COLORS[id] ?? "#3B82F6",
     }
   })
@@ -564,19 +564,20 @@ export function LandingPage() {
       <div style={{
         position: "fixed", bottom: 16, right: 16, zIndex: 999,
         padding: "10px 16px", borderRadius: 10,
-        background: status === "connected" ? "rgba(16,185,129,0.15)" : status === "connecting" ? "rgba(59,130,246,0.15)" : "rgba(239,68,68,0.15)",
-        border: `1px solid ${status === "connected" ? "#10B981" : status === "connecting" ? "#3B82F6" : "#EF4444"}40`,
+        background: status === "ok" ? "rgba(16,185,129,0.15)" : status === "loading" ? "rgba(59,130,246,0.15)" : "rgba(239,68,68,0.15)",
+        border: `1px solid ${status === "ok" ? "#10B981" : status === "loading" ? "#3B82F6" : "#EF4444"}40`,
         backdropFilter: "blur(12px)",
         fontSize: 11, fontFamily: "monospace",
-        color: status === "connected" ? "#10B981" : status === "connecting" ? "#93C5FD" : "#EF4444",
+        color: status === "ok" ? "#10B981" : status === "loading" ? "#93C5FD" : "#EF4444",
         maxWidth: 320,
       }}>
         <div style={{ fontWeight: 700, marginBottom: 2 }}>
-          {status === "connected" ? "✓ Binance WS connected" : status === "connecting" ? "⟳ Connecting to Binance…" : "✗ " + status}
+          {status === "ok" ? "✓ CoinGecko connected" : status === "loading" ? "⟳ Fetching prices…" : "✗ Price fetch " + status}
         </div>
         {errMsg && <div style={{ fontSize: 10, opacity: 0.8, marginTop: 2 }}>{errMsg}</div>}
         <div style={{ fontSize: 10, opacity: 0.6, marginTop: 2 }}>
           BTC: {prices["BTCUSDT"]?.price ? `$${prices["BTCUSDT"].price.toLocaleString()}` : "waiting…"}
+          {lastFetch && ` · ${lastFetch.toLocaleTimeString()}`}
         </div>
       </div>
 
