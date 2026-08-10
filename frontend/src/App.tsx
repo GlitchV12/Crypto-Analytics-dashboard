@@ -180,25 +180,28 @@ function Home() {
   const topVol = stats?.symbolStats?.[0]
   const volume = stats?.totalVolume ?? 0
 
-  // Build merged price history that includes ALL pinned symbols (default + custom)
-  const localHistRef = useRef<PricePoint[]>([])
+  // Build merged price history — uses refs so the interval never restarts
+  const localHistRef      = useRef<PricePoint[]>([])
+  const allStatsRef       = useRef(allSymbolStats)
+  const pinnedPricesRef   = useRef(pinnedPrices)
   const [mergedHistory, setMergedHistory] = useState<PricePoint[]>([])
 
+  // Keep refs current without triggering effect re-runs
+  useEffect(() => { allStatsRef.current     = allSymbolStats }, [allSymbolStats])
+  useEffect(() => { pinnedPricesRef.current = pinnedPrices   }, [pinnedPrices])
+
+  // Single stable interval — reads from refs, never restarts
   useEffect(() => {
     const id = setInterval(() => {
       const prices: Record<string, number> = {}
-      // Default 5 from live stats
-      allSymbolStats.forEach(s => { if (s.lastPrice > 0) prices[s.symbol] = s.lastPrice })
-      // Any extra pinned coins from REST polling
-      Object.values(pinnedPrices).forEach(p => { if (p.lastPrice > 0) prices[p.symbol] = p.lastPrice })
+      allStatsRef.current.forEach(s     => { if (s.lastPrice   > 0) prices[s.symbol]   = s.lastPrice })
+      Object.values(pinnedPricesRef.current).forEach(p => { if (p.lastPrice > 0) prices[p.symbol] = p.lastPrice })
       if (Object.keys(prices).length === 0) return
-      const point: PricePoint = { second: Math.floor(Date.now() / 1000), prices }
-      localHistRef.current = [...localHistRef.current.slice(-299), point]
+      localHistRef.current = [...localHistRef.current.slice(-299), { second: Math.floor(Date.now() / 1000), prices }]
       setMergedHistory([...localHistRef.current])
     }, 1_000)
     return () => clearInterval(id)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allSymbolStats, pinnedPrices])
+  }, []) // empty deps — intentional, reads via refs
 
   return (
     <div style={{ minHeight: "100vh", background: "#0F172A", color: "#F1F5F9", fontFamily: "'Inter','Segoe UI',system-ui,sans-serif" }}>
