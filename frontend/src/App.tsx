@@ -1,4 +1,4 @@
-import { Routes, Route, useNavigate, useLocation, Navigate } from "react-router-dom"
+import { Routes, Route, useNavigate, useLocation } from "react-router-dom"
 import { TrendingUp, Activity, DollarSign, Zap, BarChart2, LogOut, User } from "lucide-react"
 import { useAnalytics }      from "./hooks/useAnalytics"
 import { StatCard }          from "./components/StatCard"
@@ -12,6 +12,7 @@ import { CoinDetail }        from "./pages/CoinDetail"
 import { TradePage }         from "./pages/TradePage"
 import { CommoditiesPage }   from "./pages/CommoditiesPage"
 import { LoginPage }         from "./pages/LoginPage"
+import { LandingPage }       from "./pages/LandingPage"
 import { useAuth }           from "./contexts/AuthContext"
 import { formatUSD, formatRate, formatPrice, formatNumber } from "./lib/format"
 
@@ -21,7 +22,7 @@ const SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
   if (loading) return null
-  if (!user)   return <Navigate to="/login" replace />
+  if (!user)   return <LandingPage />
   return <>{children}</>
 }
 
