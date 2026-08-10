@@ -23,15 +23,9 @@ const BINANCE_STREAM =
   ["btcusdt","ethusdt","bnbusdt","solusdt","xrpusdt"]
     .map(s => `${s}@aggTrade/${s}@miniTicker`).join("/")
 
-const COINGECKO_URL =
-  "https://api.coingecko.com/api/v3/simple/price" +
-  "?ids=bitcoin,ethereum,binancecoin,solana,ripple" +
-  "&vs_currencies=usd&include_24hr_change=true"
-
-const CG_ID_MAP: Record<string,string> = {
-  bitcoin:"BTCUSDT", ethereum:"ETHUSDT",
-  binancecoin:"BNBUSDT", solana:"SOLUSDT", ripple:"XRPUSDT",
-}
+// Binance REST — CORS-friendly, no API key needed
+const BINANCE_REST =
+  'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"]'
 
 export type ConnectionState = "connecting" | "connected" | "disconnected"
 
@@ -102,23 +96,20 @@ export function useAnalytics(): UseAnalyticsReturn {
     setDataSource(prev => prev === "none" ? "coingecko" : prev)
 
     async function poll() {
-      console.log("[CoinGecko] polling...")
+      console.log("[Binance REST] polling prices...")
       try {
-        const res  = await fetch(COINGECKO_URL, {
-          headers: {
-            "Accept": "application/json",
-            "User-Agent": "CryptoStream/1.0",
-          },
-        })
-        const data = await res.json() as Record<string,Record<string,number>>
-        console.log("[CoinGecko] response:", data)
+        const res  = await fetch(BINANCE_REST)
+        console.log("[Binance REST] status:", res.status)
+        const data = await res.json() as {symbol:string; lastPrice:string; priceChangePercent:string}[]
+        console.log("[Binance REST] got", data.length, "symbols")
         const syms = symStateMap()
-        for (const [id, vals] of Object.entries(data)) {
-          const sym = CG_ID_MAP[id]
-          if (!sym) continue
-          syms[sym].lastPrice = vals["usd"] ?? 0
-          syms[sym].prices    = [vals["usd"] ?? 0]
-          console.log(`[CoinGecko] ${sym} = $${syms[sym].lastPrice}`)
+        for (const row of data) {
+          const sym = row.symbol
+          if (!syms[sym]) continue
+          const price = parseFloat(row.lastPrice)
+          syms[sym].lastPrice = price
+          syms[sym].prices    = [price]
+          console.log(`[Binance REST] ${sym} = $${price}`)
         }
         if (!unmounted.current) {
           setStats(buildStats(syms, []))
@@ -244,14 +235,22 @@ export function useAnalytics(): UseAnalyticsReturn {
       delayRef.current = RECONNECT_MS
     }
 
+    let msgCount = 0
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data)
-        if (msg.type === "stats") { setStats(msg.payload); setLastUpdate(new Date()) }
-        else if (msg.type === "alert_triggered") {
+        if (msg.type === "stats") {
+          msgCount++
+          if (msgCount === 1) console.log("[Backend WS] first stats message received:", JSON.stringify(msg.payload).slice(0, 200))
+          if (msgCount <= 3) console.log(`[Backend WS] stats #${msgCount} — BTC lastPrice:`, msg.payload?.symbolStats?.find((s: {symbol:string}) => s.symbol === "BTCUSDT")?.lastPrice)
+          setStats(msg.payload)
+          setLastUpdate(new Date())
+        } else if (msg.type === "alert_triggered") {
           setTriggeredAlerts(p => [...p.slice(-9), msg.payload])
+        } else {
+          console.log("[Backend WS] unknown message type:", msg.type)
         }
-      } catch { /* ignore */ }
+      } catch(e) { console.error("[Backend WS] parse error:", e) }
     }
 
     ws.onclose = (e) => {

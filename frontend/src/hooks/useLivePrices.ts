@@ -1,7 +1,6 @@
 /**
- * useLivePrices — fetches real crypto prices via CoinGecko REST API.
- * No WebSocket, no Binance dependency, works everywhere globally.
- * Polls every 15 seconds. Zero API key required.
+ * useLivePrices — Binance REST API polling.
+ * CORS-friendly, no API key, works from browser globally.
  */
 import { useEffect, useRef, useState } from "react"
 
@@ -17,21 +16,8 @@ export interface LivePrice {
 
 export type FetchStatus = "idle" | "loading" | "ok" | "error"
 
-const COINGECKO_URL =
-  "https://api.coingecko.com/api/v3/simple/price" +
-  "?ids=bitcoin,ethereum,binancecoin,solana,ripple" +
-  "&vs_currencies=usd" +
-  "&include_24hr_change=true" +
-  "&include_24hr_vol=true" +
-  "&include_high_vol=false"
-
-const ID_TO_SYMBOL: Record<string, string> = {
-  bitcoin:     "BTCUSDT",
-  ethereum:    "ETHUSDT",
-  binancecoin: "BNBUSDT",
-  solana:      "SOLUSDT",
-  ripple:      "XRPUSDT",
-}
+const BINANCE_REST =
+  'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"]'
 
 const EMPTY: Record<string, LivePrice> = {}
 
@@ -44,32 +30,33 @@ export function useLivePrices() {
   const unmounted = useRef(false)
 
   async function fetchPrices() {
-    console.log("[useLivePrices] fetching CoinGecko prices...")
+    console.log("[useLivePrices] fetching from Binance REST...")
     setStatus("loading")
     try {
-      const res = await fetch(COINGECKO_URL, {
-        headers: {
-          Accept: "application/json",
-          "User-Agent": "CryptoStream/1.0 (https://github.com/GlitchV12/Crypto-Analytics-dashboard)",
-        },
-      })
-      console.log("[useLivePrices] response status:", res.status)
+      const res = await fetch(BINANCE_REST)
+      console.log("[useLivePrices] Binance REST status:", res.status)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json() as Record<string, Record<string, number>>
-      console.log("[useLivePrices] raw data:", data)
+
+      const data = await res.json() as {
+        symbol: string
+        lastPrice: string
+        priceChangePercent: string
+        highPrice: string
+        lowPrice: string
+      }[]
+
+      console.log("[useLivePrices] got", data.length, "tickers")
 
       const next: Record<string, LivePrice> = {}
-      for (const [id, vals] of Object.entries(data)) {
-        const sym = ID_TO_SYMBOL[id]
-        if (!sym) continue
-        next[sym] = {
-          symbol:    sym,
-          price:     vals["usd"]            ?? 0,
-          change24h: vals["usd_24h_change"] ?? 0,
-          high24h:   0,
-          low24h:    0,
+      for (const row of data) {
+        next[row.symbol] = {
+          symbol:    row.symbol,
+          price:     parseFloat(row.lastPrice),
+          change24h: parseFloat(row.priceChangePercent),
+          high24h:   parseFloat(row.highPrice),
+          low24h:    parseFloat(row.lowPrice),
         }
-        console.log(`[useLivePrices] ${sym} = $${next[sym].price} (${next[sym].change24h.toFixed(2)}%)`)
+        console.log(`[useLivePrices] ${row.symbol} = $${row.lastPrice} (${row.priceChangePercent}%)`)
       }
 
       if (!unmounted.current) {
@@ -88,14 +75,13 @@ export function useLivePrices() {
   }
 
   useEffect(() => {
-    console.log("[useLivePrices] useEffect mounted — starting price polling")
+    console.log("[useLivePrices] mounting — starting Binance REST polling")
     unmounted.current = false
     fetchPrices()
     timerRef.current = setInterval(fetchPrices, 15_000)
     return () => {
       unmounted.current = true
       if (timerRef.current) clearInterval(timerRef.current)
-      console.log("[useLivePrices] unmounted")
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
