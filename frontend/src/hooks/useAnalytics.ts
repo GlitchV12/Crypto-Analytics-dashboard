@@ -1,11 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react"
 import type { Stats, WSMessage, TriggeredAlert } from "../types"
+import { getWsUrl } from "../lib/config"
 
-function getWsUrl(): string {
-  if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL as string
-  if (import.meta.env.DEV) return "ws://localhost:8080/ws"
-  return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"
-}
 const WS_URL = getWsUrl()
 
 const RECONNECT_DELAY_MS = 2000

@@ -11,6 +11,7 @@ import { OrderBookDepth }         from "../components/coin/OrderBookDepth"
 import { AlertsPanel }            from "../components/coin/AlertsPanel"
 import { ConnectionBadge }        from "../components/ConnectionBadge"
 import { formatPrice, formatUSD, formatNumber, shortSym } from "../lib/format"
+import { getApiUrl } from "../lib/config"
 import { computeForecast, DEFAULT_ELEMENTS } from "../lib/forecast"
 import type { ElementFactor }     from "../lib/forecast"
 import type { CoinDetail as CoinDetailType, Candle } from "../types"
@@ -54,8 +55,8 @@ export function CoinDetail({ embedded = false }: { embedded?: boolean }) {
     if (!symbol) return
     setLoading(true)
     Promise.all([
-      fetch(`/api/coin/${symbol}`).then(r => r.json()),
-      fetch(`/api/coin/${symbol}/candles`).then(r => r.json()),
+      fetch(getApiUrl(`/api/coin/${symbol}`)).then(r => r.json()),
+      fetch(getApiUrl(`/api/coin/${symbol}/candles`)).then(r => r.json()),
     ]).then(([det, cdls]: [CoinDetailType, Candle[]]) => {
       setDetail(det)
       setCandles(cdls ?? [])
@@ -67,7 +68,7 @@ export function CoinDetail({ embedded = false }: { embedded?: boolean }) {
   useEffect(() => {
     if (!symbol) return
     const id = setInterval(() => {
-      fetch(`/api/coin/${symbol}/candles`).then(r => r.json()).then((cdls: Candle[]) => setCandles(cdls ?? [])).catch(() => {})
+      fetch(getApiUrl(`/api/coin/${symbol}/candles`)).then(r => r.json()).then((cdls: Candle[]) => setCandles(cdls ?? [])).catch(() => {})
     }, 90_000)
     return () => clearInterval(id)
   }, [symbol])

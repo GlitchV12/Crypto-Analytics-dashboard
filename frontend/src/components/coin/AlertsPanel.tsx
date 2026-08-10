@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { Bell, BellOff, Trash2 } from "lucide-react"
 import type { Alert, TriggeredAlert } from "../../types"
 import { formatPrice } from "../../lib/format"
+import { getApiUrl }  from "../../lib/config"
 
 interface Props {
   symbol:          string
@@ -23,7 +24,7 @@ export function AlertsPanel({ symbol, currentPrice, triggeredAlerts, onClear }: 
   }, [])
 
   useEffect(() => {
-    fetch(`/api/alerts?symbol=${symbol}`)
+    fetch(getApiUrl(`/api/alerts?symbol=${symbol}`))
       .then(r => r.json())
       .then((data: Alert[]) => setAlerts(data.filter(a => a.symbol === symbol)))
       .catch(() => {})
@@ -40,7 +41,7 @@ export function AlertsPanel({ symbol, currentPrice, triggeredAlerts, onClear }: 
     if (!price || isNaN(p) || p <= 0) { setError("Enter a valid price"); return }
     setCreating(true); setError("")
     try {
-      const resp = await fetch("/api/alerts", {
+      const resp = await fetch(getApiUrl("/api/alerts"), {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ symbol, direction, price: p }),
@@ -58,7 +59,7 @@ export function AlertsPanel({ symbol, currentPrice, triggeredAlerts, onClear }: 
 
   const deleteAlert = async (id: number) => {
     try {
-      await fetch(`/api/alerts/${id}`, { method: "DELETE" })
+      await fetch(getApiUrl(`/api/alerts/${id}`), { method: "DELETE" })
       setAlerts(prev => prev.filter(a => a.id !== id))
     } catch { /* ignore */ }
   }
