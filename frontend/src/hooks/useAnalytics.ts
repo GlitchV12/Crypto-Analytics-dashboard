@@ -104,7 +104,12 @@ export function useAnalytics(): UseAnalyticsReturn {
     async function poll() {
       console.log("[CoinGecko] polling...")
       try {
-        const res  = await fetch(COINGECKO_URL)
+        const res  = await fetch(COINGECKO_URL, {
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "CryptoStream/1.0",
+          },
+        })
         const data = await res.json() as Record<string,Record<string,number>>
         console.log("[CoinGecko] response:", data)
         const syms = symStateMap()

@@ -48,7 +48,10 @@ export function useLivePrices() {
     setStatus("loading")
     try {
       const res = await fetch(COINGECKO_URL, {
-        headers: { Accept: "application/json" },
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "CryptoStream/1.0 (https://github.com/GlitchV12/Crypto-Analytics-dashboard)",
+        },
       })
       console.log("[useLivePrices] response status:", res.status)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
