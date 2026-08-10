@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react"
 import { useNavigate } from "react-router-dom"
+import { useLivePrices } from "../hooks/useLivePrices"
 import {
   TrendingUp, TrendingDown, Zap, Shield, BarChart2,
   DollarSign, Bell, Globe, ArrowRight, ChevronDown,
@@ -188,16 +189,19 @@ function Reveal({ children, delay = 0 }: { children: React.ReactNode; delay?: nu
 /* ══════════════════════════════════════════════
    TICKER — animated price pill
 ══════════════════════════════════════════════ */
-const TICKERS = [
-  { symbol: "BTC", price: "67,234.50", change: "+2.4%", up: true,  color: "#F59E0B" },
-  { symbol: "ETH", price: "3,512.80",  change: "+1.8%", up: true,  color: "#3B82F6" },
-  { symbol: "SOL", price: "178.90",    change: "-0.6%", up: false, color: "#8B5CF6" },
-  { symbol: "XAU", price: "2,345.60",  change: "+0.9%", up: true,  color: "#EAB308" },
-  { symbol: "WTI", price: "82.14",     change: "+1.2%", up: true,  color: "#F97316" },
-  { symbol: "XRP", price: "0.5821",    change: "+3.1%", up: true,  color: "#EC4899" },
+const COIN_COLORS: Record<string,string> = {
+  BTCUSDT:"#F59E0B", ETHUSDT:"#3B82F6", BNBUSDT:"#10B981",
+  SOLUSDT:"#8B5CF6", XRPUSDT:"#EC4899",
+}
+
+const TICKER_FALLBACK = [
+  { symbol:"BTC", price:"—", change:"…", up:true,  color:"#F59E0B" },
+  { symbol:"ETH", price:"—", change:"…", up:true,  color:"#3B82F6" },
+  { symbol:"SOL", price:"—", change:"…", up:false, color:"#8B5CF6" },
+  { symbol:"XRP", price:"—", change:"…", up:true,  color:"#EC4899" },
 ]
 
-function TickerPill({ t }: { t: typeof TICKERS[0] }) {
+function TickerPill({ t }: { t: typeof TICKER_FALLBACK[0] }) {
   return (
     <div style={{
       display:      "flex",
@@ -292,6 +296,29 @@ const COMMS = [
 export function LandingPage() {
   const navigate = useNavigate()
   const [scrolled, setScrolled] = useState(false)
+  const { prices, status, errMsg } = useLivePrices()
+
+  // Build ticker list from live prices
+  const liveTickers = [
+    { id:"BTCUSDT", sym:"BTC" },
+    { id:"ETHUSDT", sym:"ETH" },
+    { id:"SOLUSDT", sym:"SOL" },
+    { id:"XRPUSDT", sym:"XRP" },
+  ].map(({ id, sym }) => {
+    const p = prices[id]
+    const fmtPrice = (n: number) =>
+      n > 1000 ? n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})
+      : n > 1   ? n.toFixed(2)
+      : n > 0   ? n.toFixed(4)
+      : "—"
+    return {
+      symbol: sym,
+      price:  p?.price ? fmtPrice(p.price) : "—",
+      change: p?.change != null ? `${p.change >= 0 ? "+" : ""}${p.change.toFixed(2)}%` : "…",
+      up:     (p?.change ?? 0) >= 0,
+      color:  COIN_COLORS[id] ?? "#3B82F6",
+    }
+  })
 
   useEffect(() => {
     const fn = () => setScrolled(window.scrollY > 40)
@@ -533,6 +560,26 @@ export function LandingPage() {
         </div>
       </nav>
 
+      {/* ── DATA STATUS BANNER (debug + production) ── */}
+      <div style={{
+        position: "fixed", bottom: 16, right: 16, zIndex: 999,
+        padding: "10px 16px", borderRadius: 10,
+        background: status === "connected" ? "rgba(16,185,129,0.15)" : status === "connecting" ? "rgba(59,130,246,0.15)" : "rgba(239,68,68,0.15)",
+        border: `1px solid ${status === "connected" ? "#10B981" : status === "connecting" ? "#3B82F6" : "#EF4444"}40`,
+        backdropFilter: "blur(12px)",
+        fontSize: 11, fontFamily: "monospace",
+        color: status === "connected" ? "#10B981" : status === "connecting" ? "#93C5FD" : "#EF4444",
+        maxWidth: 320,
+      }}>
+        <div style={{ fontWeight: 700, marginBottom: 2 }}>
+          {status === "connected" ? "✓ Binance WS connected" : status === "connecting" ? "⟳ Connecting to Binance…" : "✗ " + status}
+        </div>
+        {errMsg && <div style={{ fontSize: 10, opacity: 0.8, marginTop: 2 }}>{errMsg}</div>}
+        <div style={{ fontSize: 10, opacity: 0.6, marginTop: 2 }}>
+          BTC: {prices["BTCUSDT"]?.price ? `$${prices["BTCUSDT"].price.toLocaleString()}` : "waiting…"}
+        </div>
+      </div>
+
       {/* ── HERO ── */}
       <section style={S.hero}>
         <div style={S.heroBg} />
@@ -575,8 +622,8 @@ export function LandingPage() {
 
           {/* Floating tickers */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 48 }}>
-            {TICKERS.slice(0, 3).map(t => (
-              <div key={t.symbol} style={{ animation: "floatB 3s ease-in-out infinite", animationDelay: `${TICKERS.indexOf(t) * 0.4}s` }}>
+            {liveTickers.slice(0, 3).map(t => (
+              <div key={t.symbol} style={{ animation: "floatB 3s ease-in-out infinite", animationDelay: `${liveTickers.indexOf(t) * 0.4}s` }}>
                 <TickerPill t={t} />
               </div>
             ))}
@@ -628,7 +675,7 @@ export function LandingPage() {
       {/* ── TICKER MARQUEE ── */}
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.04)", borderBottom: "1px solid rgba(255,255,255,0.04)", overflow: "hidden", padding: "18px 0", background: "rgba(255,255,255,0.01)" }}>
         <div style={{ display: "flex", animation: "marquee 20s linear infinite", width: "max-content" }}>
-          {[...TICKERS, ...TICKERS, ...TICKERS, ...TICKERS].map((t, i) => (
+          {[...liveTickers,...liveTickers,...liveTickers,...liveTickers].map((t, i) => (
             <div key={i} style={{ marginRight: 16 }}>
               <TickerPill t={t} />
             </div>
