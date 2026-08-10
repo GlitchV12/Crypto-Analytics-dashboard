@@ -2,144 +2,185 @@ package binance
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"analytics-backend/internal/queue"
-
-	"github.com/gorilla/websocket"
 )
 
 var Pairs = []string{"btcusdt", "ethusdt", "bnbusdt", "solusdt", "xrpusdt"}
 
-const wsURL = "wss://stream.binance.com:9443/stream?streams="
-
 var (
-	TradesReceived  atomic.Int64
-	ConnectAttempts atomic.Int64
-	Connected       atomic.Int32
-	LastError       atomic.Value
-	MsgsReceived    atomic.Int64 // raw messages from WS
-	EnvParseErrors  atomic.Int64 // failed envelope unmarshal
-	TradeParseErrors atomic.Int64 // failed inner trade unmarshal
-	WrongEventType  atomic.Int64 // event type != "trade"
+	TradesReceived   atomic.Int64
+	ConnectAttempts  atomic.Int64
+	Connected        atomic.Int32
+	LastError        atomic.Value
+	MsgsReceived     atomic.Int64
+	EnvParseErrors   atomic.Int64
+	TradeParseErrors atomic.Int64
+	WrongEventType   atomic.Int64
 )
 
-type envelope struct {
-	Stream string          `json:"stream"`
-	Data   json.RawMessage `json:"data"`
+// tickerResponse from GET /api/v3/ticker/24hr
+type tickerResponse struct {
+	Symbol             string `json:"symbol"`
+	LastPrice          string `json:"lastPrice"`
+	PriceChangePercent string `json:"priceChangePercent"`
+	Volume             string `json:"volume"`       // base asset volume
+	QuoteVolume        string `json:"quoteVolume"`  // USDT volume
+	HighPrice          string `json:"highPrice"`
+	LowPrice           string `json:"lowPrice"`
+	Count              int64  `json:"count"` // number of trades in 24h
 }
 
-type rawTrade struct {
-	EventType string `json:"e"`
-	EventTime int64  `json:"E"` // must be explicit — Go JSON is case-insensitive, "E" would collide with "e" otherwise
-	TradeID   int64  `json:"t"`
-	Symbol    string `json:"s"`
-	Price     string `json:"p"`
-	Quantity  string `json:"q"`
-	IsMaker   bool   `json:"m"`
-	TradeTime int64  `json:"T"`
+// aggTradeResponse from GET /api/v3/aggTrades
+type aggTradeResponse struct {
+	ID       int64  `json:"a"`
+	Price    string `json:"p"`
+	Quantity string `json:"q"`
+	IsMaker  bool   `json:"m"`
+	Time     int64  `json:"T"`
 }
 
+// Run polls Binance REST API — avoids WebSocket geo-blocks on cloud servers.
 func Run(q *queue.Queue) {
-	streams := make([]string, len(Pairs))
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	symbols := make([]string, len(Pairs))
 	for i, p := range Pairs {
-		streams[i] = p + "@trade"
+		symbols[i] = `"` + toUpper(p) + `"`
 	}
-	url := wsURL + strings.Join(streams, "/")
-	log.Printf("binance: connecting to %s", url)
+	tickerURL := `https://api.binance.com/api/v3/ticker/24hr?symbols=[` +
+		joinStrings(symbols, ",") + `]`
+
+	log.Printf("binance: starting REST polling — %v", Pairs)
 
 	for {
 		ConnectAttempts.Add(1)
-		Connected.Store(0)
-		if err := connect(url, q); err != nil {
-			msg := err.Error()
-			LastError.Store(msg)
-			log.Printf("binance ws error: %v — reconnecting in 3s", err)
+		if err := pollTicker(client, tickerURL, q); err != nil {
+			LastError.Store(err.Error())
+			log.Printf("binance REST ticker error: %v", err)
+			Connected.Store(0)
+			time.Sleep(3 * time.Second)
+			continue
 		}
-		time.Sleep(3 * time.Second)
+
+		// Fetch recent aggTrades for each symbol to get realistic trade flow
+		for _, pair := range Pairs {
+			sym := toUpper(pair)
+			if err := pollAggTrades(client, sym, q); err != nil {
+				log.Printf("binance REST aggTrades %s error: %v", sym, err)
+			}
+			time.Sleep(120 * time.Millisecond) // gentle rate limiting
+		}
+
+		Connected.Store(1)
+		time.Sleep(2 * time.Second)
 	}
 }
 
-var dialer = &websocket.Dialer{
-	HandshakeTimeout: 10 * time.Second,
-	NetDial: func(network, addr string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: 10 * time.Second}).Dial(network, addr)
-	},
-	Proxy: http.ProxyFromEnvironment,
-}
-
-func connect(url string, q *queue.Queue) error {
-	conn, _, err := dialer.Dial(url, nil)
+func pollTicker(client *http.Client, url string, q *queue.Queue) error {
+	resp, err := client.Get(url)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	Connected.Store(1)
-	log.Printf("binance: connected — streaming %d pairs", len(Pairs))
+	defer resp.Body.Close()
 
-	for {
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			Connected.Store(0)
-			return err
-		}
-		MsgsReceived.Add(1)
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("ticker HTTP %d", resp.StatusCode)
+	}
 
-		// Log first 5 raw messages so we can see the real format
-		if MsgsReceived.Load() <= 5 {
-			log.Printf("binance raw msg #%d: %s", MsgsReceived.Load(), truncate(msg, 200))
-		}
+	var tickers []tickerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tickers); err != nil {
+		return err
+	}
 
-		var env envelope
-		if err := json.Unmarshal(msg, &env); err != nil {
-			EnvParseErrors.Add(1)
+	MsgsReceived.Add(1)
+	if MsgsReceived.Load() <= 3 {
+		log.Printf("binance REST: got %d tickers", len(tickers))
+	}
+
+	for _, t := range tickers {
+		price, _ := strconv.ParseFloat(t.LastPrice, 64)
+		qty, _   := strconv.ParseFloat(t.Volume, 64)
+		if price == 0 {
 			continue
 		}
-		if env.Data == nil {
-			WrongEventType.Add(1)
-			continue
-		}
-
-		var rt rawTrade
-		if err := json.Unmarshal(env.Data, &rt); err != nil {
-			if TradeParseErrors.Add(1) <= 3 {
-				log.Printf("binance trade parse error: %v | data: %s", err, truncate(env.Data, 150))
-			}
-			continue
-		}
-		if rt.EventType != "trade" {
-			WrongEventType.Add(1)
-			continue
-		}
-
-		price, _ := strconv.ParseFloat(rt.Price, 64)
-		qty, _ := strconv.ParseFloat(rt.Quantity, 64)
-		side := "buy"
-		if rt.IsMaker {
-			side = "sell"
-		}
-
+		// Push a synthetic trade so the DB + stats pipeline gets price data
 		q.Push(queue.Trade{
-			ID:        rt.TradeID,
-			Symbol:    rt.Symbol,
+			ID:        time.Now().UnixNano(),
+			Symbol:    t.Symbol,
 			Price:     price,
-			Quantity:  qty,
-			Side:      side,
-			Timestamp: rt.TradeTime,
+			Quantity:  qty / 1000, // normalise — actual vol posted via aggTrades
+			Side:      "buy",
+			Timestamp: time.Now().UnixMilli(),
 		})
 		TradesReceived.Add(1)
 	}
+	return nil
 }
 
-func truncate(b []byte, n int) string {
-	if len(b) <= n {
-		return string(b)
+func pollAggTrades(client *http.Client, symbol string, q *queue.Queue) error {
+	url := "https://api.binance.com/api/v3/aggTrades?symbol=" + symbol + "&limit=20"
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
 	}
-	return string(b[:n]) + "..."
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil // non-fatal
+	}
+
+	var trades []aggTradeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&trades); err != nil {
+		return err
+	}
+
+	for _, t := range trades {
+		price, _ := strconv.ParseFloat(t.Price, 64)
+		qty, _   := strconv.ParseFloat(t.Quantity, 64)
+		if price == 0 {
+			continue
+		}
+		side := "buy"
+		if t.IsMaker {
+			side = "sell"
+		}
+		q.Push(queue.Trade{
+			ID:        t.ID,
+			Symbol:    symbol,
+			Price:     price,
+			Quantity:  qty,
+			Side:      side,
+			Timestamp: t.Time,
+		})
+		TradesReceived.Add(1)
+	}
+	return nil
+}
+
+func toUpper(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'a' && c <= 'z' {
+			b[i] = c - 32
+		}
+	}
+	return string(b)
+}
+
+func joinStrings(ss []string, sep string) string {
+	result := ""
+	for i, s := range ss {
+		if i > 0 {
+			result += sep
+		}
+		result += s
+	}
+	return result
 }

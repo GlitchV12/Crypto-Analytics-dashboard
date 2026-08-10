@@ -241,10 +241,15 @@ export function useAnalytics(): UseAnalyticsReturn {
         const msg = JSON.parse(ev.data)
         if (msg.type === "stats") {
           msgCount++
-          if (msgCount === 1) console.log("[Backend WS] first stats message received:", JSON.stringify(msg.payload).slice(0, 200))
-          if (msgCount <= 3) console.log(`[Backend WS] stats #${msgCount} — BTC lastPrice:`, msg.payload?.symbolStats?.find((s: {symbol:string}) => s.symbol === "BTCUSDT")?.lastPrice)
-          setStats(msg.payload)
-          setLastUpdate(new Date())
+          const btcPrice = msg.payload?.symbolStats?.find((s: {symbol:string}) => s.symbol === "BTCUSDT")?.lastPrice ?? 0
+          if (msgCount <= 3) console.log(`[Backend WS] stats #${msgCount} — BTC: $${btcPrice}`)
+          // Only use backend stats if they contain real prices
+          if (btcPrice > 0) {
+            setStats(msg.payload)
+            setLastUpdate(new Date())
+          } else {
+            console.log("[Backend WS] stats have zero prices — backend still warming up, keeping REST data")
+          }
         } else if (msg.type === "alert_triggered") {
           setTriggeredAlerts(p => [...p.slice(-9), msg.payload])
         } else {
