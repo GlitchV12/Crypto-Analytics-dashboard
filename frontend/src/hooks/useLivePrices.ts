@@ -1,7 +1,3 @@
-/**
- * useLivePrices — Binance REST API polling.
- * CORS-friendly, no API key, works from browser globally.
- */
 import { useEffect, useRef, useState } from "react"
 
 console.log("[useLivePrices] module loaded")
@@ -16,13 +12,21 @@ export interface LivePrice {
 
 export type FetchStatus = "idle" | "loading" | "ok" | "error"
 
-const BINANCE_REST =
-  'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"]'
+// No custom headers — simple GET avoids CORS preflight, CoinGecko allows it
+const COINGECKO_URL =
+  "https://api.coingecko.com/api/v3/simple/price" +
+  "?ids=bitcoin,ethereum,binancecoin,solana,ripple" +
+  "&vs_currencies=usd" +
+  "&include_24hr_change=true" +
+  "&include_high_vol=false"
 
-const EMPTY: Record<string, LivePrice> = {}
+const ID_MAP: Record<string, string> = {
+  bitcoin: "BTCUSDT", ethereum: "ETHUSDT",
+  binancecoin: "BNBUSDT", solana: "SOLUSDT", ripple: "XRPUSDT",
+}
 
 export function useLivePrices() {
-  const [prices,    setPrices]    = useState<Record<string, LivePrice>>(EMPTY)
+  const [prices,    setPrices]    = useState<Record<string, LivePrice>>({})
   const [status,    setStatus]    = useState<FetchStatus>("idle")
   const [lastFetch, setLastFetch] = useState<Date | null>(null)
   const [errMsg,    setErrMsg]    = useState("")
@@ -30,33 +34,29 @@ export function useLivePrices() {
   const unmounted = useRef(false)
 
   async function fetchPrices() {
-    console.log("[useLivePrices] fetching from Binance REST...")
+    console.log("[useLivePrices] fetching CoinGecko...")
     setStatus("loading")
     try {
-      const res = await fetch(BINANCE_REST)
-      console.log("[useLivePrices] Binance REST status:", res.status)
+      // Plain fetch — no custom headers to avoid CORS preflight
+      const res = await fetch(COINGECKO_URL)
+      console.log("[useLivePrices] CoinGecko status:", res.status)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
-      const data = await res.json() as {
-        symbol: string
-        lastPrice: string
-        priceChangePercent: string
-        highPrice: string
-        lowPrice: string
-      }[]
-
-      console.log("[useLivePrices] got", data.length, "tickers")
+      const data = await res.json() as Record<string, Record<string, number>>
+      console.log("[useLivePrices] CoinGecko data:", data)
 
       const next: Record<string, LivePrice> = {}
-      for (const row of data) {
-        next[row.symbol] = {
-          symbol:    row.symbol,
-          price:     parseFloat(row.lastPrice),
-          change24h: parseFloat(row.priceChangePercent),
-          high24h:   parseFloat(row.highPrice),
-          low24h:    parseFloat(row.lowPrice),
+      for (const [id, vals] of Object.entries(data)) {
+        const sym = ID_MAP[id]
+        if (!sym) continue
+        next[sym] = {
+          symbol:    sym,
+          price:     vals["usd"]            ?? 0,
+          change24h: vals["usd_24h_change"] ?? 0,
+          high24h:   0,
+          low24h:    0,
         }
-        console.log(`[useLivePrices] ${row.symbol} = $${row.lastPrice} (${row.priceChangePercent}%)`)
+        console.log(`[useLivePrices] ${sym} = $${next[sym].price}`)
       }
 
       if (!unmounted.current) {
@@ -66,16 +66,13 @@ export function useLivePrices() {
         setErrMsg("")
       }
     } catch (err) {
-      console.error("[useLivePrices] fetch failed:", err)
-      if (!unmounted.current) {
-        setStatus("error")
-        setErrMsg(String(err))
-      }
+      console.error("[useLivePrices] failed:", err)
+      if (!unmounted.current) { setStatus("error"); setErrMsg(String(err)) }
     }
   }
 
   useEffect(() => {
-    console.log("[useLivePrices] mounting — starting Binance REST polling")
+    console.log("[useLivePrices] mounted — polling CoinGecko every 15s")
     unmounted.current = false
     fetchPrices()
     timerRef.current = setInterval(fetchPrices, 15_000)
