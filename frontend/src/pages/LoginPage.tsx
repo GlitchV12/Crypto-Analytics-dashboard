@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react"
 import { useNavigate }        from "react-router-dom"
-import { useGoogleLogin }     from "@react-oauth/google"
+import { GoogleLogin }        from "@react-oauth/google"
 import { TrendingUp, Eye, EyeOff, Mail, Lock, User, AlertCircle } from "lucide-react"
+import type { CredentialResponse } from "@react-oauth/google"
 import { useAuth }            from "../contexts/AuthContext"
 
 /* ─── Sci-fi canvas background ──────────────────────────── */
@@ -236,36 +237,31 @@ export function LoginPage() {
   const [confirm,  setConfirm]  = useState("")
   const [showPw,   setShowPw]   = useState(false)
   const [error,    setError]    = useState("")
-  const [busy,     setBusy]     = useState(false)
   const [googleErr, setGoogleErr] = useState("")
 
   useEffect(() => {
     if (user) navigate("/", { replace: true })
   }, [user, navigate])
 
-  /* ── Google login — call directly from onClick, no async before ── */
-  const googleLogin = useGoogleLogin({
-    onSuccess: async (tokenResponse) => {
-      setBusy(true)
-      setGoogleErr("")
-      try {
-        const res  = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-          headers: { Authorization: `Bearer ${tokenResponse.access_token}` },
-        })
-        const data = await res.json()
-        login({ name: data.name ?? "User", email: data.email ?? "", picture: data.picture ?? "", sub: data.sub ?? "" })
-        navigate("/", { replace: true })
-      } catch {
-        setGoogleErr("Could not fetch user info. Try again.")
-      } finally {
-        setBusy(false)
-      }
-    },
-    onError: (e) => {
-      console.error(e)
-      setGoogleErr("Google sign-in failed or was cancelled.")
-    },
-  })
+  /* ── Google login via ID token (no popup) ── */
+  function handleGoogleSuccess(credentialResponse: CredentialResponse) {
+    setGoogleErr("")
+    try {
+      const token   = credentialResponse.credential
+      if (!token) throw new Error("No credential")
+      // Decode JWT payload (base64url → JSON)
+      const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")))
+      login({
+        name:    payload.name    ?? "User",
+        email:   payload.email   ?? "",
+        picture: payload.picture ?? "",
+        sub:     payload.sub     ?? "",
+      })
+      navigate("/", { replace: true })
+    } catch {
+      setGoogleErr("Google sign-in failed. Please try again.")
+    }
+  }
 
   function handleEmailSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -496,31 +492,17 @@ export function LoginPage() {
 
           {divider}
 
-          {/* Google button — call googleLogin() DIRECTLY, no async gap */}
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => { setGoogleErr(""); googleLogin() }}
-            style={{
-              width: "100%", display: "flex", alignItems: "center", justifyContent: "center",
-              gap: 10, padding: "11px 20px", borderRadius: 10,
-              border: "1px solid #1E293B",
-              background: busy ? "#0A1220" : "rgba(255,255,255,0.97)",
-              color: busy ? "#475569" : "#1F2937",
-              fontSize: 14, fontWeight: 600, cursor: busy ? "not-allowed" : "pointer",
-              opacity: busy ? 0.7 : 1, transition: "all 0.15s",
-            }}
-          >
-            {!busy && (
-              <svg width="18" height="18" viewBox="0 0 18 18">
-                <path fill="#4285F4" d="M16.51 8H8.98v3h4.3c-.18 1-.74 1.48-1.6 2.04v2.01h2.6a7.8 7.8 0 0 0 2.38-5.88c0-.57-.05-.66-.15-1.18z"/>
-                <path fill="#34A853" d="M8.98 17c2.16 0 3.97-.72 5.3-1.94l-2.6-2.04c-.72.49-1.63.78-2.7.78-2.08 0-3.84-1.41-4.47-3.29H1.88v2.07A8 8 0 0 0 8.98 17z"/>
-                <path fill="#FBBC05" d="M4.51 10.51A4.8 4.8 0 0 1 4.26 9c0-.52.09-1.02.25-1.51V5.42H1.88A8 8 0 0 0 .98 9c0 1.29.31 2.51.9 3.58l2.63-2.07z"/>
-                <path fill="#EA4335" d="M8.98 3.58c1.17 0 2.23.4 3.06 1.2l2.3-2.3A8 8 0 0 0 8.98 1 8 8 0 0 0 1.88 5.42l2.63 2.07c.63-1.88 2.39-3.91 4.47-3.91z"/>
-              </svg>
-            )}
-            {busy ? "Signing in…" : "Continue with Google"}
-          </button>
+          {/* GoogleLogin renders Google's own iframe button — no popup blocking */}
+          <div style={{ display: "flex", justifyContent: "center" }}>
+            <GoogleLogin
+              onSuccess={handleGoogleSuccess}
+              onError={() => setGoogleErr("Google sign-in failed or was cancelled.")}
+              theme="filled_black"
+              shape="rectangular"
+              width="396"
+              text="continue_with"
+            />
+          </div>
 
           {googleErr && (
             <div style={{
