@@ -9,6 +9,7 @@ import { SideSplitChart }    from "./components/SideSplitChart"
 import { VolumeBar }         from "./components/VolumeBar"
 import { ConnectionBadge }   from "./components/ConnectionBadge"
 import { CoinDetail }        from "./pages/CoinDetail"
+import { ErrorBoundary }     from "./components/ErrorBoundary"
 import { TradePage }         from "./pages/TradePage"
 import { CommoditiesPage }   from "./pages/CommoditiesPage"
 import { LoginPage }         from "./pages/LoginPage"
@@ -294,7 +295,7 @@ export default function App() {
         <Protected><Home /></Protected>
       } />
       <Route path="/coin/:symbol" element={
-        <Protected><CoinDetailPage /></Protected>
+        <ErrorBoundary><Protected><CoinDetailPage /></Protected></ErrorBoundary>
       } />
       <Route path="/trade" element={
         <Protected><TradePage /></Protected>
