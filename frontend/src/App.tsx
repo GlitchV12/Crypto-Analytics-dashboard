@@ -1,6 +1,8 @@
+import { useState }          from "react"
 import { Routes, Route, useNavigate, useLocation } from "react-router-dom"
-import { TrendingUp, Activity, DollarSign, Zap, BarChart2, LogOut, User } from "lucide-react"
+import { TrendingUp, Activity, DollarSign, Zap, BarChart2, LogOut, User, Search } from "lucide-react"
 import { useAnalytics }      from "./hooks/useAnalytics"
+import { usePinnedCryptos }  from "./hooks/usePinnedCryptos"
 import { StatCard }          from "./components/StatCard"
 import { PriceChart }        from "./components/PriceChart"
 import { TradesChart }       from "./components/TradesChart"
@@ -10,14 +12,13 @@ import { VolumeBar }         from "./components/VolumeBar"
 import { ConnectionBadge }   from "./components/ConnectionBadge"
 import { CoinDetail }        from "./pages/CoinDetail"
 import { ErrorBoundary }     from "./components/ErrorBoundary"
+import { CryptoSearch }      from "./components/CryptoSearch"
 import { TradePage }         from "./pages/TradePage"
 import { CommoditiesPage }   from "./pages/CommoditiesPage"
 import { LoginPage }         from "./pages/LoginPage"
 import { LandingPage }       from "./pages/LandingPage"
 import { useAuth }           from "./contexts/AuthContext"
 import { formatUSD, formatRate, formatPrice, formatNumber } from "./lib/format"
-
-const SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
 
 /* ─── Protected Route ────────────────────────────── */
 function Protected({ children }: { children: React.ReactNode }) {
@@ -153,7 +154,26 @@ function AppHeader() {
 /* ─── Home ───────────────────────────────────────── */
 function Home() {
   const { stats, connectionState, lastUpdate } = useAnalytics()
-  const navigate = useNavigate()
+  const navigate    = useNavigate()
+  const [showSearch, setShowSearch] = useState(false)
+  const {
+    pinned, prices: pinnedPrices,
+    searchResult, searching, searchErr,
+    search, pin, unpin, isPinned, isDefault,
+  } = usePinnedCryptos()
+
+  // Merge live WS stats with REST prices for ALL pinned symbols
+  const allSymbolStats = pinned.map(sym => {
+    const live = stats?.symbolStats?.find(s => s.symbol === sym)
+    const pinP = pinnedPrices[sym]
+    return {
+      symbol:    sym,
+      lastPrice: live?.lastPrice ?? pinP?.lastPrice ?? 0,
+      avgPrice:  live?.avgPrice  ?? pinP?.lastPrice ?? 0,
+      trades:    live?.trades    ?? 0,
+      volume:    live?.volume    ?? pinP?.volume    ?? 0,
+    }
+  })
 
   const btc    = stats?.symbolStats?.find(s => s.symbol === "BTCUSDT")
   const topVol = stats?.symbolStats?.[0]
@@ -174,7 +194,7 @@ function Home() {
         </div>
 
         {/* Quick actions */}
-        <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+        <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
           <button onClick={() => navigate("/trade")} style={{
             display: "flex", alignItems: "center", gap: 6,
             padding: "8px 16px", borderRadius: 8, border: "1px solid #10B98140",
@@ -188,6 +208,13 @@ function Home() {
             background: "#F59E0B10", color: "#F59E0B", fontSize: 13, fontWeight: 600, cursor: "pointer",
           }}>
             🏅 Commodities
+          </button>
+          <button onClick={() => setShowSearch(true)} style={{
+            display: "flex", alignItems: "center", gap: 6, marginLeft: "auto",
+            padding: "8px 18px", borderRadius: 8, border: "1px solid #3B82F640",
+            background: "#3B82F610", color: "#3B82F6", fontSize: 13, fontWeight: 600, cursor: "pointer",
+          }}>
+            <Search size={14} /> Search &amp; Pin Crypto
           </button>
         </div>
 
@@ -238,7 +265,7 @@ function Home() {
           gridTemplateColumns: "1fr 340px",
           gap: 16, marginBottom: 16,
         }}>
-          <SymbolTable data={stats?.symbolStats ?? []} />
+          <SymbolTable data={allSymbolStats} />
           <SideSplitChart data={stats?.sideSplit ?? []} />
         </div>
 
@@ -248,10 +275,27 @@ function Home() {
           gridTemplateColumns: "1fr 1fr",
           gap: 16,
         }}>
-          <PriceChart data={stats?.priceHistory ?? []} symbols={SYMBOLS} />
-          <VolumeBar  data={stats?.symbolStats ?? []} />
+          <PriceChart data={stats?.priceHistory ?? []} symbols={pinned} />
+          <VolumeBar  data={allSymbolStats} />
         </div>
       </main>
+
+      {/* Crypto Search Modal */}
+      {showSearch && (
+        <CryptoSearch
+          onClose={() => setShowSearch(false)}
+          onSearch={search}
+          results={searchResult}
+          searching={searching}
+          searchErr={searchErr}
+          isPinned={isPinned}
+          isDefault={isDefault}
+          pin={pin}
+          unpin={unpin}
+          pinned={pinned}
+          prices={pinnedPrices}
+        />
+      )}
 
       {/* Connecting overlay */}
       {!stats && connectionState === "connecting" && (

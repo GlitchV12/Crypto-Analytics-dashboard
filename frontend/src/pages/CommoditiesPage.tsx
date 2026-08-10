@@ -258,10 +258,10 @@ export function CommoditiesPage() {
           ))}
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 20 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 20, alignItems: "start" }}>
 
-          {/* Left: detail panel */}
-          <div>
+          {/* Left: detail panel — sticky so it doesn't scroll */}
+          <div style={{ position: "sticky", top: 88, maxHeight: "calc(100vh - 108px)", overflowY: "auto" }}>
             {active && (
               <>
                 {/* Hero card */}
@@ -325,8 +325,13 @@ export function CommoditiesPage() {
             )}
           </div>
 
-          {/* Right: commodity cards */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {/* Right: commodity cards — independently scrollable */}
+          <div style={{
+            display: "flex", flexDirection: "column", gap: 10,
+            maxHeight: "calc(100vh - 108px)", overflowY: "auto",
+            paddingRight: 4,
+            scrollbarWidth: "thin",
+          }}>
             {visible.map(c => (
               <CommodityCard
                 key={c.id}
