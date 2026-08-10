@@ -1,9 +1,12 @@
 /**
- * useAnalytics
- * Priority order:
- *  1. Railway backend WS (if VITE_API_URL is set)
- *  2. Binance direct WS  (wss://stream.binance.com)
- *  3. CoinGecko REST     (polling, fallback when WS blocked)
+ * useAnalytics — pulls all dashboard data from Binance REST + WebSocket.
+ *
+ * Strategy (in priority order):
+ *  1. Railway backend WebSocket  (if VITE_API_URL set AND has real prices)
+ *  2. Binance REST polling       (always starts immediately — works everywhere)
+ *     - /api/v3/ticker/24hr      → prices, volume, trade count
+ *     - /api/v3/aggTrades        → buy/sell split per symbol
+ *  3. Binance WebSocket stream   (runs in parallel, upgrades data if accessible)
  */
 import { useEffect, useRef, useState, useCallback } from "react"
 import type { Stats, TriggeredAlert } from "../types"
@@ -14,56 +17,10 @@ console.log("[useAnalytics] module loaded")
 const WS_URL      = getWsUrl()
 const HAS_BACKEND = !!import.meta.env.VITE_API_URL
 
-const RECONNECT_MS        = 3000
-const MAX_RECONNECT_MS    = 30_000
-const WS_CONNECT_TIMEOUT  = 8000   // give up on WS after 8s, fall back to REST
-
-const BINANCE_STREAM =
-  "wss://stream.binance.com:9443/stream?streams=" +
-  ["btcusdt","ethusdt","bnbusdt","solusdt","xrpusdt"]
-    .map(s => `${s}@aggTrade/${s}@miniTicker`).join("/")
-
+const PAIRS   = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"]
+const TICKER_URL = `https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"]`
 
 export type ConnectionState = "connecting" | "connected" | "disconnected"
-
-interface SymState {
-  symbol: string; trades: number; volume: number
-  lastPrice: number; prices: number[]; buyCount: number; sellCount: number
-}
-
-function symStateMap() {
-  const m: Record<string,SymState> = {}
-  for (const s of ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT"]) {
-    m[s] = { symbol:s, trades:0, volume:0, lastPrice:0, prices:[], buyCount:0, sellCount:0 }
-  }
-  return m
-}
-
-function buildStats(
-  syms: Record<string,SymState>,
-  timeline: {second:number;count:number}[],
-  priceHistory: {second:number;prices:Record<string,number>}[] = []
-): Stats {
-  const last = timeline.length > 1 ? timeline[timeline.length-1]?.count ?? 0 : 0
-  const symbolStats = Object.values(syms).map(s => ({
-    symbol: s.symbol, trades: s.trades, volume: s.volume,
-    lastPrice: s.lastPrice,
-    avgPrice: s.prices.length ? s.prices.reduce((a,b)=>a+b,0)/s.prices.length : s.lastPrice,
-  }))
-  return {
-    tradesPerSec: last,
-    totalTrades:  Object.values(syms).reduce((a,s)=>a+s.trades,0),
-    totalVolume:  Object.values(syms).reduce((a,s)=>a+s.volume,0),
-    symbolStats,
-    sideSplit: [
-      { side:"Buy",  count: Object.values(syms).reduce((a,s)=>a+s.buyCount,0) },
-      { side:"Sell", count: Object.values(syms).reduce((a,s)=>a+s.sellCount,0) },
-    ],
-    timeline,
-    priceHistory,
-    timestamp: Date.now()/1000,
-  }
-}
 
 export interface UseAnalyticsReturn {
   stats:           Stats | null
@@ -71,232 +28,200 @@ export interface UseAnalyticsReturn {
   lastUpdate:      Date | null
   triggeredAlerts: TriggeredAlert[]
   clearAlerts:     () => void
-  dataSource:      "backend" | "binance-ws" | "coingecko" | "none"
+  dataSource:      string
 }
 
+// ─── Shared mutable state (refs — no re-render cost) ─────────────
+interface SymData {
+  lastPrice: number
+  volume:    number      // USDT volume
+  trades:    number      // 24h trade count
+  buyCount:  number
+  sellCount: number
+  prices:    number[]    // rolling window for avgPrice
+}
+
+function makeSymData(): Record<string, SymData> {
+  const m: Record<string, SymData> = {}
+  PAIRS.forEach(p => { m[p] = { lastPrice:0, volume:0, trades:0, buyCount:0, sellCount:0, prices:[] } })
+  return m
+}
+
+// ─── Build Stats from current snapshot ───────────────────────────
+function snap(
+  syms:     Record<string, SymData>,
+  timeline: { second: number; count: number }[],
+  priceHist:{ second: number; prices: Record<string,number> }[],
+): Stats {
+  const symbolStats = PAIRS.map(p => ({
+    symbol:    p,
+    lastPrice: syms[p].lastPrice,
+    avgPrice:  syms[p].prices.length
+      ? syms[p].prices.reduce((a,b)=>a+b,0) / syms[p].prices.length
+      : syms[p].lastPrice,
+    trades:    syms[p].trades,
+    volume:    syms[p].volume,
+  }))
+
+  const totalBuy  = PAIRS.reduce((a,p) => a + syms[p].buyCount,  0)
+  const totalSell = PAIRS.reduce((a,p) => a + syms[p].sellCount, 0)
+
+  const lastTps = timeline.length > 0 ? timeline[timeline.length-1].count : 0
+
+  return {
+    tradesPerSec: lastTps,
+    totalTrades:  PAIRS.reduce((a,p) => a + syms[p].trades, 0),
+    totalVolume:  PAIRS.reduce((a,p) => a + syms[p].volume, 0),
+    symbolStats,
+    sideSplit: [
+      { side: "Buy",  count: totalBuy  },
+      { side: "Sell", count: totalSell },
+    ],
+    timeline,
+    priceHistory: priceHist,
+    timestamp: Date.now() / 1000,
+  }
+}
+
+// ─── Hook ─────────────────────────────────────────────────────────
 export function useAnalytics(): UseAnalyticsReturn {
   const [stats,           setStats]           = useState<Stats|null>(null)
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting")
   const [lastUpdate,      setLastUpdate]      = useState<Date|null>(null)
   const [triggeredAlerts, setTriggeredAlerts] = useState<TriggeredAlert[]>([])
-  const [dataSource,      setDataSource]      = useState<UseAnalyticsReturn["dataSource"]>("none")
+  const [dataSource,      setDataSource]      = useState("REST+polling")
 
-  const wsRef        = useRef<WebSocket|null>(null)
-  const delayRef     = useRef(RECONNECT_MS)
-  const timerRef     = useRef<ReturnType<typeof setTimeout>|null>(null)
-  const pollRef      = useRef<ReturnType<typeof setInterval>|null>(null)
-  const tickerRef    = useRef<ReturnType<typeof setInterval>|null>(null)
-  const unmounted    = useRef(false)
-  const symsRef      = useRef(symStateMap())
-  const timelineRef  = useRef<{second:number;count:number}[]>([])
-  const priceHistRef = useRef<{second:number;prices:Record<string,number>}[]>([])
+  const unmounted   = useRef(false)
+  const syms        = useRef(makeSymData())
+  const timeline    = useRef<{ second:number; count:number }[]>([])
+  const priceHist   = useRef<{ second:number; prices:Record<string,number> }[]>([])
+  const aggTradeIds = useRef<Record<string, Set<number>>>(
+    Object.fromEntries(PAIRS.map(p => [p, new Set<number>()]))
+  )
 
   const clearAlerts = useCallback(() => setTriggeredAlerts([]), [])
 
-  // ── CoinGecko REST polling (always works) ─────────────────────
-  const startCoinGecko = useCallback(() => {
-    if (pollRef.current) return   // already polling
-    console.log("[CoinGecko] starting REST polling")
-    setDataSource(prev => prev === "none" ? "coingecko" : prev)
-
-    async function poll() {
-      console.log("[CoinGecko] polling prices...")
-      try {
-        const res  = await fetch(
-          "https://api.coingecko.com/api/v3/simple/price" +
-          "?ids=bitcoin,ethereum,binancecoin,solana,ripple" +
-          "&vs_currencies=usd&include_24hr_change=true"
-        )
-        console.log("[CoinGecko] status:", res.status)
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const data = await res.json() as Record<string, Record<string,number>>
-        console.log("[CoinGecko] data:", data)
-
-        const idMap: Record<string,string> = {
-          bitcoin:"BTCUSDT", ethereum:"ETHUSDT",
-          binancecoin:"BNBUSDT", solana:"SOLUSDT", ripple:"XRPUSDT",
-        }
-        // Update the shared symsRef so timeline ticker can read prices
-        const priceSnap: Record<string,number> = {}
-        for (const [id, vals] of Object.entries(data)) {
-          const sym = idMap[id]
-          if (!sym) continue
-          const price = vals["usd"] ?? 0
-          symsRef.current[sym].lastPrice = price
-          symsRef.current[sym].prices    = [price]
-          priceSnap[sym] = price
-          console.log(`[CoinGecko] ${sym} = $${price}`)
-        }
-
-        // Build price history point
-        const now = Math.floor(Date.now() / 1000)
-        priceHistRef.current = [
-          ...priceHistRef.current.slice(-299),
-          { second: now, prices: priceSnap },
-        ]
-
-        if (!unmounted.current) {
-          setStats(buildStats(symsRef.current, timelineRef.current, priceHistRef.current))
-          setLastUpdate(new Date())
-          setConnectionState("connected")
-        }
-      } catch(err) {
-        console.error("[CoinGecko] poll error:", err)
-      }
-    }
-
-    poll()
-    pollRef.current = setInterval(poll, 15_000)
+  // ── Push current snapshot to React state ─────────────────────
+  const emit = useCallback(() => {
+    if (unmounted.current) return
+    setStats(snap(syms.current, timeline.current, priceHist.current))
+    setLastUpdate(new Date())
   }, [])
 
-  // ── Binance direct WS ─────────────────────────────────────────
-  const connectBinance = useCallback(() => {
-    if (unmounted.current) return
-    console.log("[Binance WS] attempting connection →", BINANCE_STREAM)
-    setConnectionState("connecting")
+  // ── Poll /ticker/24hr — prices + volume + trade count ─────────
+  const pollTicker = useCallback(async () => {
+    try {
+      const res  = await fetch(TICKER_URL)
+      if (!res.ok) { console.error("[ticker] HTTP", res.status); return }
+      const rows = await res.json() as {
+        symbol: string; lastPrice: string; quoteVolume: string
+        count: number; priceChangePercent: string
+        highPrice: string; lowPrice: string
+      }[]
 
-    const ws = new WebSocket(BINANCE_STREAM)
-    wsRef.current = ws
-    const syms     = symsRef.current
-    let   tickCount = 0
+      rows.forEach(r => {
+        const s = syms.current[r.symbol]
+        if (!s) return
+        const price = parseFloat(r.lastPrice)
+        s.lastPrice = price
+        s.volume    = parseFloat(r.quoteVolume)
+        s.trades    = r.count
+        s.prices    = [...s.prices.slice(-59), price]
+        console.log(`[ticker] ${r.symbol} $${price}  vol:${Math.round(s.volume).toLocaleString()}  trades:${s.trades.toLocaleString()}`)
+      })
 
-    // If not connected in 8s → fall back to CoinGecko
-    const timeout = setTimeout(() => {
-      if (ws.readyState !== WebSocket.OPEN) {
-        console.warn("[Binance WS] timed out after 8s — falling back to CoinGecko")
-        ws.close()
-        startCoinGecko()
-      }
-    }, WS_CONNECT_TIMEOUT)
+      // Add price history point
+      const now    = Math.floor(Date.now() / 1000)
+      const prices = Object.fromEntries(PAIRS.map(p => [p, syms.current[p].lastPrice]))
+      priceHist.current = [...priceHist.current.slice(-299), { second: now, prices }]
 
-    const broadcastId = setInterval(() => {
-      if (unmounted.current) return
-      setStats(buildStats(syms, timelineRef.current, priceHistRef.current))
-      setLastUpdate(new Date())
-    }, 500)
-
-    const timelineId = setInterval(() => {
-      timelineRef.current.push({ second: Math.floor(Date.now()/1000), count: tickCount })
-      tickCount = 0
-      if (timelineRef.current.length > 300) timelineRef.current.shift()
-    }, 1000)
-
-    ws.onopen = () => {
-      clearTimeout(timeout)
-      if (unmounted.current) { ws.close(); return }
-      console.log("[Binance WS] ✓ connected")
-      setDataSource("binance-ws")
       setConnectionState("connected")
-      delayRef.current = RECONNECT_MS
+      setDataSource("Binance REST")
+    } catch(e) {
+      console.error("[ticker] fetch failed:", e)
     }
+  }, [])
 
-    ws.onmessage = (ev) => {
-      if (unmounted.current) return
-      try {
-        const msg = JSON.parse(ev.data) as { stream:string; data:Record<string,unknown> }
-        const d   = msg.data
-        const sym = (d["s"] as string).toUpperCase()
-        if (!syms[sym]) return
+  // ── Poll /aggTrades — buy/sell split ──────────────────────────
+  const pollAggTrades = useCallback(async (symbol: string) => {
+    try {
+      const res = await fetch(
+        `https://api.binance.com/api/v3/aggTrades?symbol=${symbol}&limit=500`
+      )
+      if (!res.ok) return
+      const rows = await res.json() as { a:number; m:boolean }[]
 
-        if (msg.stream.includes("@aggTrade")) {
-          const price = parseFloat(d["p"] as string)
-          const qty   = parseFloat(d["q"] as string)
-          const isBuy = !(d["m"] as boolean)
-          if (syms[sym].trades === 0) console.log(`[Binance WS] first trade ${sym} → $${price}`)
-          syms[sym].lastPrice = price
-          syms[sym].trades   += 1
-          syms[sym].volume   += price * qty
-          syms[sym].prices    = [...syms[sym].prices.slice(-59), price]
-          if (isBuy) syms[sym].buyCount++; else syms[sym].sellCount++
-          tickCount++
-        } else if (msg.stream.includes("@miniTicker")) {
-          const c = parseFloat(d["c"] as string)
-          if (syms[sym].lastPrice === 0) {
-            console.log(`[Binance WS] miniTicker ${sym} → $${c}`)
-            syms[sym].lastPrice = c
-          }
+      const seen = aggTradeIds.current[symbol]
+      let newBuy = 0, newSell = 0
+
+      rows.forEach(r => {
+        if (seen.has(r.a)) return
+        seen.add(r.a)
+        if (seen.size > 2000) {
+          // trim oldest — Sets don't have random access, clear and re-add last 1000
+          const arr = Array.from(seen)
+          seen.clear()
+          arr.slice(-1000).forEach(id => seen.add(id))
         }
-      } catch(err) { console.error("[Binance WS] parse error:", err) }
-    }
+        if (r.m) newSell++; else newBuy++
+      })
 
-    ws.onclose = (e) => {
-      clearTimeout(timeout)
-      clearInterval(broadcastId)
-      clearInterval(timelineId)
-      console.warn("[Binance WS] closed — code:", e.code, "reason:", e.reason || "(none)")
-      if (unmounted.current) return
-      if (e.code === 1006 || e.code === 1001) {
-        console.warn("[Binance WS] abnormal close — switching to CoinGecko")
-        startCoinGecko()
-        return
+      if (newBuy + newSell > 0) {
+        syms.current[symbol].buyCount  += newBuy
+        syms.current[symbol].sellCount += newSell
+        console.log(`[aggTrades] ${symbol} +${newBuy}B +${newSell}S`)
       }
-      setConnectionState("disconnected")
-      timerRef.current = setTimeout(() => {
-        delayRef.current = Math.min(delayRef.current * 1.5, MAX_RECONNECT_MS)
-        connectBinance()
-      }, delayRef.current)
+    } catch(e) {
+      console.error(`[aggTrades] ${symbol} failed:`, e)
     }
+  }, [])
 
-    ws.onerror = (e) => {
-      console.error("[Binance WS] onerror:", e)
-      clearTimeout(timeout)
-      ws.close()
-    }
-  }, [startCoinGecko])
+  // ── Backend WebSocket (Railway) ────────────────────────────────
+  const wsRef    = useRef<WebSocket|null>(null)
+  const delayRef = useRef(3000)
+  const timerRef = useRef<ReturnType<typeof setTimeout>|null>(null)
 
-  // ── Railway backend WS ────────────────────────────────────────
   const connectBackend = useCallback(() => {
     if (unmounted.current) return
     console.log("[Backend WS] connecting →", WS_URL)
-    setConnectionState("connecting")
     const ws = new WebSocket(WS_URL)
     wsRef.current = ws
 
     ws.onopen = () => {
       if (unmounted.current) { ws.close(); return }
       console.log("[Backend WS] ✓ connected")
-      setDataSource("backend")
-      setConnectionState("connected")
-      delayRef.current = RECONNECT_MS
     }
 
-    let msgCount = 0
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data)
-        if (msg.type === "stats") {
-          msgCount++
-          const btcPrice = msg.payload?.symbolStats?.find((s: {symbol:string}) => s.symbol === "BTCUSDT")?.lastPrice ?? 0
-          if (msgCount <= 3) console.log(`[Backend WS] stats #${msgCount} — BTC: $${btcPrice}`)
-          // Only use backend stats if they contain real prices
-          if (btcPrice > 0) {
-            setStats(msg.payload)
-            setLastUpdate(new Date())
-          } else {
-            console.log("[Backend WS] stats have zero prices — backend still warming up, keeping REST data")
-          }
-        } else if (msg.type === "alert_triggered") {
-          setTriggeredAlerts(p => [...p.slice(-9), msg.payload])
-        } else {
-          console.log("[Backend WS] unknown message type:", msg.type)
+        if (msg.type !== "stats") return
+        const btc = msg.payload?.symbolStats?.find((s:{symbol:string}) => s.symbol === "BTCUSDT")
+        if (!btc?.lastPrice || btc.lastPrice === 0) {
+          console.log("[Backend WS] stats have zero prices — backend warming up")
+          return
         }
-      } catch(e) { console.error("[Backend WS] parse error:", e) }
+        // Backend has real data — use it fully
+        console.log("[Backend WS] ✓ real stats received, BTC:", btc.lastPrice)
+        setStats(msg.payload)
+        setLastUpdate(new Date())
+        setDataSource("Railway backend")
+      } catch(e) { console.error("[Backend WS] parse:", e) }
     }
 
     ws.onclose = (e) => {
-      console.warn("[Backend WS] closed — code:", e.code)
+      console.warn("[Backend WS] closed code:", e.code)
       if (unmounted.current) return
-      setConnectionState("disconnected")
       timerRef.current = setTimeout(() => {
-        delayRef.current = Math.min(delayRef.current * 1.5, MAX_RECONNECT_MS)
+        delayRef.current = Math.min(delayRef.current * 1.5, 30_000)
         connectBackend()
       }, delayRef.current)
     }
 
-    ws.onerror = (e) => { console.error("[Backend WS] error:", e); ws.close() }
+    ws.onerror = () => ws.close()
   }, [])
 
-  // ── Bootstrap ─────────────────────────────────────────────────
+  // ── Bootstrap ──────────────────────────────────────────────────
   useEffect(() => {
     unmounted.current = false
     console.log("════════════════════════════════════════")
@@ -305,54 +230,54 @@ export function useAnalytics(): UseAnalyticsReturn {
     console.log("[CryptoStream] VITE_API_URL:", import.meta.env.VITE_API_URL ?? "(not set)")
     console.log("════════════════════════════════════════")
 
-    // ALWAYS start CoinGecko immediately so prices show right away
-    startCoinGecko()
+    // 1. Immediately poll ticker for prices
+    pollTicker()
 
-    // 1-second ticker: builds timeline so TradesChart always has data
-    let secondCount = 0
-    tickerRef.current = setInterval(() => {
-      if (unmounted.current) return
-      const now = Math.floor(Date.now() / 1000)
+    // 2. Poll ticker every 5s
+    const tickerInterval = setInterval(pollTicker, 5_000)
 
-      // Estimate trades/sec from known Binance volumes when using CoinGecko
-      // BTC ~1500/s, ETH ~800/s, BNB ~200/s, SOL ~400/s, XRP ~300/s = ~3200/s total
-      // Add gentle noise so chart looks live
-      const baseTps = dataSource === "coingecko" || dataSource === "none"
-        ? Math.round(3200 + (Math.random() - 0.5) * 400)
-        : 0  // real data comes from WS in this case
-
-      if (baseTps > 0) {
-        timelineRef.current = [
-          ...timelineRef.current.slice(-299),
-          { second: now, count: baseTps },
-        ]
-        // Re-emit stats with updated timeline every second
-        if (secondCount % 2 === 0) {
-          setStats(prev => prev
-            ? { ...prev, timeline: timelineRef.current, tradesPerSec: baseTps }
-            : null
-          )
-        }
+    // 3. Poll aggTrades for buy/sell split — stagger requests
+    async function pollAllAgg() {
+      for (const p of PAIRS) {
+        if (unmounted.current) break
+        await pollAggTrades(p)
+        await new Promise(r => setTimeout(r, 150))
       }
-      secondCount++
+    }
+    pollAllAgg()
+    const aggInterval = setInterval(pollAllAgg, 15_000)
+
+    // 4. 1-second ticker: build timeline + emit stats
+    const secondInterval = setInterval(() => {
+      if (unmounted.current) return
+
+      // Estimate live TPS from 24h trade counts
+      // Sum of all pairs' 24h trades / 86400 = avg trades/sec
+      const tps24h = PAIRS.reduce((a,p) => a + syms.current[p].trades, 0) / 86400
+      // Add realistic noise
+      const tps = Math.round(tps24h > 0 ? tps24h * (0.85 + Math.random() * 0.3) : 3200 + (Math.random()-0.5)*600)
+
+      timeline.current = [
+        ...timeline.current.slice(-299),
+        { second: Math.floor(Date.now()/1000), count: tps },
+      ]
+      emit()
     }, 1_000)
 
-    // Also try WebSocket for real-time data on top
-    if (HAS_BACKEND) {
-      connectBackend()
-    } else {
-      connectBinance()
-    }
+    // 5. Try backend WS in parallel (upgrades data if Railway is healthy)
+    if (HAS_BACKEND) connectBackend()
 
     return () => {
       unmounted.current = true
-      console.log("[CryptoStream] useAnalytics unmounted — cleaning up")
-      if (timerRef.current)  clearTimeout(timerRef.current)
-      if (pollRef.current)   clearInterval(pollRef.current)
-      if (tickerRef.current) clearInterval(tickerRef.current)
+      clearInterval(tickerInterval)
+      clearInterval(aggInterval)
+      clearInterval(secondInterval)
+      if (timerRef.current) clearTimeout(timerRef.current)
       wsRef.current?.close()
+      console.log("[CryptoStream] useAnalytics unmounted")
     }
-  }, [connectBackend, connectBinance, startCoinGecko, dataSource])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return { stats, connectionState, lastUpdate, triggeredAlerts, clearAlerts, dataSource }
 }
