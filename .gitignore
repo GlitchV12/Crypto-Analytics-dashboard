@@ -16,3 +16,5 @@ backend/analytics.db-wal
 
 # Misc
 *.log
+.vercel
+.env*

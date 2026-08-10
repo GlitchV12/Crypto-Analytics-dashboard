@@ -97,9 +97,9 @@ export function useAnalytics(): UseAnalyticsReturn {
 
   // ── CoinGecko REST polling (always works) ─────────────────────
   const startCoinGecko = useCallback(() => {
-    console.log("[CoinGecko] starting REST polling fallback")
-    setDataSource("coingecko")
-    setConnectionState("connected")
+    if (pollRef.current) return   // already polling
+    console.log("[CoinGecko] starting REST polling")
+    setDataSource(prev => prev === "none" ? "coingecko" : prev)
 
     async function poll() {
       console.log("[CoinGecko] polling...")
@@ -123,11 +123,9 @@ export function useAnalytics(): UseAnalyticsReturn {
         if (!unmounted.current) {
           setStats(buildStats(syms, []))
           setLastUpdate(new Date())
-          setConnectionState("connected")
         }
       } catch(err) {
         console.error("[CoinGecko] poll error:", err)
-        if (!unmounted.current) setConnectionState("disconnected")
       }
     }
 
@@ -276,9 +274,12 @@ export function useAnalytics(): UseAnalyticsReturn {
     console.log("[CryptoStream] useAnalytics mounted")
     console.log("[CryptoStream] HAS_BACKEND:", HAS_BACKEND)
     console.log("[CryptoStream] VITE_API_URL:", import.meta.env.VITE_API_URL ?? "(not set)")
-    console.log("[CryptoStream] will try:", HAS_BACKEND ? "backend → fallback" : "Binance WS → CoinGecko")
     console.log("════════════════════════════════════════")
 
+    // ALWAYS start CoinGecko immediately so prices show right away
+    startCoinGecko()
+
+    // Also try WebSocket for real-time data on top
     if (HAS_BACKEND) {
       connectBackend()
     } else {
@@ -292,7 +293,7 @@ export function useAnalytics(): UseAnalyticsReturn {
       if (pollRef.current)  clearInterval(pollRef.current)
       wsRef.current?.close()
     }
-  }, [connectBackend, connectBinance])
+  }, [connectBackend, connectBinance, startCoinGecko])
 
   return { stats, connectionState, lastUpdate, triggeredAlerts, clearAlerts, dataSource }
 }
